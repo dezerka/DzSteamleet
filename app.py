@@ -11,7 +11,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 # Імпортуємо агента
 from agent import create_agent, extract_response_text, extract_tools_debug, MODEL_NAME
+import logging
+import sys
 
+# Налаштовуємо логер один раз
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 # ============================================================
 # НАЛАШТУВАННЯ СТОРІНКИ
 # ============================================================
@@ -20,6 +28,51 @@ st.set_page_config(
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+    section[data-testid="stAppViewContainer"] {
+        background-color: #f8faf5 !important;
+    }
+
+    section[data-testid="stSidebar"] div[data-testid="stBlock"] {
+        background-color: #e8f5e9 !important;
+        border: 1px solid #a5d6a7 !important;
+        border-radius: 16px;
+    }
+
+    div[data-testid="stBlock"] > div[class*="css-"] {
+        background-color: #e8f5e9 !important;
+        border-color: #a5d6a7 !important;
+    }
+
+    .stButton>button,
+    .stSelectbox>div,
+    .stTextInput>div,
+    .stTextArea>div {
+        border-color: #a5d6a7 !important;
+    }
+
+    @media (prefers-color-scheme: dark) {
+        section[data-testid="stAppViewContainer"] {
+            background-color: #1f2937 !important;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stBlock"] {
+            background-color: #2f3e46 !important;
+            border-color: #4f7054 !important;
+        }
+
+        div[data-testid="stBlock"] > div[class*="css-"] {
+            background-color: #2f3e46 !important;
+            border-color: #4f7054 !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # ============================================================
@@ -76,19 +129,22 @@ def get_filtered_tasks() -> list[dict]:
 
 def render_task_card(task: dict, key_suffix: str = ""):
     st.markdown(f"**{task['title']}**")
-    st.caption(f"ID: {task['id']} • Пріоритет: {task['priority']} • Статус: {task['status']}")
+    st.caption(f"ID: {task['id']} • Пріоритет: {task['priority']} • Status: {task['status']}")
 
     status_options = ["open", "in_progress", "done"]
     priority_options = ["High", "Medium", "Low"]
     suffix = f"_{key_suffix}" if key_suffix else ""
 
+    # ДИНАМІЧНІ КЛЮЧІ: включають поточний стан задачі. 
+    # Якщо Агент змінить статус, ключ стане іншим, і Стрімліт оновить віджет сам!
+    status_key = f"status_{task['id']}_{task['status']}{suffix}"
+    priority_key = f"priority_{task['id']}_{task['priority']}{suffix}"
+    done_key = f"done_{task['id']}_{task['status']}{suffix}"
+
+    # --- 1. СТАТУС ---
     current_status = task.get("status", "open")
     if current_status not in status_options:
         current_status = "open"
-
-    status_key = f"status_{task['id']}{suffix}"
-    if st.session_state.get(status_key) != current_status:
-        st.session_state[status_key] = current_status
 
     new_status = st.selectbox(
         "Статус",
@@ -98,14 +154,12 @@ def render_task_card(task: dict, key_suffix: str = ""):
     )
     if new_status != task["status"]:
         task["status"] = new_status
+        st.rerun()  # Миттєво перемальовуємо сторінку з новим статусом
 
+    # --- 2. ПРІОРИТЕТ ---
     current_priority = task.get("priority", "Medium")
     if current_priority not in priority_options:
         current_priority = "Medium"
-
-    priority_key = f"priority_{task['id']}{suffix}"
-    if st.session_state.get(priority_key) != current_priority:
-        st.session_state[priority_key] = current_priority
 
     new_priority = st.selectbox(
         "Пріоритет",
@@ -115,21 +169,21 @@ def render_task_card(task: dict, key_suffix: str = ""):
     )
     if new_priority != task["priority"]:
         task["priority"] = new_priority
+        st.rerun()  # Миттєво перемальовуємо сторінку з новим пріоритетом
 
-    done_key = f"done_{task['id']}{suffix}"
-    done_default = task["status"] == "done"
-    if st.session_state.get(done_key) != done_default:
-        st.session_state[done_key] = done_default
-
+    # --- 3. ЧЕКБОКС (Виконано) ---
+    is_done = (task["status"] == "done")
+    
     done_value = st.checkbox(
         "Виконано",
-        value=st.session_state[done_key],
+        value=is_done,
         key=done_key,
     )
-    if done_value and task["status"] != "done":
-        task["status"] = "done"
-    elif not done_value and task["status"] == "done":
-        task["status"] = "open"
+    
+    # Якщо користувач клацнув чекбокс, міняємо статус і робимо rerun
+    if done_value != is_done:
+        task["status"] = "done" if done_value else "open"
+        st.rerun()
 
 # ============================================================
 # БІЧНА ПАНЕЛЬ
@@ -255,36 +309,13 @@ def sync_tasks_from_agent(result: dict):
     if not isinstance(result, dict):
         return
 
+    # Якщо граф успішно повернув оновлений список задач з AgentState
     if "tasks" in result and isinstance(result["tasks"], list):
         st.session_state.tasks = result["tasks"]
 
+    # Синхронізуємо лічильник ID для нових задач
     if "next_task_id" in result and isinstance(result["next_task_id"], int):
         st.session_state.task_next_id = result["next_task_id"]
-
-    # Fallback: якщо tasks не прийшли, оновлюємо статус за tool_call set_task_done
-    if "tasks" not in result:
-        messages = result.get("messages", [])
-        for message in messages:
-            if not isinstance(message, ToolMessage):
-                continue
-            content = message.content
-            if not isinstance(content, str):
-                continue
-            try:
-                tool_output = json.loads(content)
-            except json.JSONDecodeError:
-                continue
-
-            if tool_output.get("type") != "task_action":
-                continue
-
-            action = tool_output.get("action")
-            if action == "set_done":
-                task_id = tool_output.get("task_id")
-                for task in st.session_state.tasks:
-                    if task.get("id") == task_id:
-                        task["status"] = "done"
-                        break
 
 
 def get_agent_state(prompt: str) -> dict:
@@ -308,21 +339,49 @@ def get_agent_state(prompt: str) -> dict:
 # ФУНКЦІЯ ДЛЯ АГЕНТА
 # ============================================================
 def get_agent_response(prompt: str):
-    agent = get_langgraph_agent(api_key, MODEL_NAME)
-
-    # ВАЖЛИВО: thread_id потрібен для збереження/відновлення state між викликами
-    config = {"configurable": {"thread_id": st.session_state.thread_id}}
-    state = get_agent_state(prompt)
-
+    logger = logging.getLogger("agent")
+    logger.setLevel(logging.DEBUG)
+    
     try:
+        agent = get_langgraph_agent(api_key, MODEL_NAME)
+        logger.debug(f"Агент створений успішно")
+
+        # ВАЖЛИВО: thread_id потрібен для збереження/відновлення state між викликами
+        config = {"configurable": {"thread_id": st.session_state.thread_id}}
+        state = get_agent_state(prompt)
+        
+        logger.debug(f"State: {state}")
+
         result = agent.invoke(state, config)
+        logger.debug(f"Результат отримано: {len(result.get('messages', []))} повідомлень")
+        
+        if not result or "messages" not in result or not result["messages"]:
+            return "❌ **Помилка:** Агент не повернув жодного повідомлення", [], result
+        
         final_message = result["messages"][-1]
+        logger.debug(f"Останнє повідомлення: {type(final_message).__name__}")
+        
         text = extract_response_text(final_message)
+        logger.debug(f"Витягнутий текст: {text[:100] if text else '(порожньо)'}")
+        
+        if not text:
+            st.warning("⚠️ Агент повернув порожню відповідь. Перевірте конфігурацію API та prompt.")
+            text = "(Агент не дав відповіді)"
+        
         debug = extract_tools_debug(result["messages"])
         sync_tasks_from_agent(result)
+        
         return text, debug, result
+        
+    except KeyError as e:
+        msg = f"❌ **Помилка структури:** {str(e)}"
+        logger.error(msg, exc_info=True)
+        return msg, [], None
     except Exception as e:
-        return f"❌ **Помилка агента:** {str(e)}", [], None
+        msg = f"❌ **Помилка агента:** {str(e)}"
+        logger.error(msg, exc_info=True)
+        st.error(msg)
+        return msg, [], None
 
 # ============================================================
 # ГОЛОВНА ОБЛАСТЬ: ЧАТ
@@ -332,38 +391,46 @@ chat_col, task_col = st.columns([3, 1], gap="large")
 with chat_col:
     st.subheader("Чат")
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    # Контейнер для всіх повідомлень (включно з новими)
+    chat_container = st.container()
 
-    if prompt := st.chat_input("Введіть ваше повідомлення..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
+    # Input рендериться після контейнера, але Streamlit фіксує його знизу
+    prompt = st.chat_input("Введіть ваше повідомлення...")
 
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # Наповнюємо контейнер — всі повідомлення тут, включно з новим
+    with chat_container:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        if "Агент" in mode:
-            with st.chat_message("assistant"):
-                with st.spinner("🤔 Агент думає..."):
-                    response_text, debug, result = get_agent_response(prompt)
-                    sync_tasks_from_agent(result)
-                    st.markdown(response_text)
+        if prompt:
+            # --- Повідомлення користувача ---
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-                    if show_agent_debug and debug:
-                        with st.expander("Debug: tool calls / results", expanded=False):
-                            st.json(debug)
+            # --- Відповідь асистента ---
+            if "Агент" in mode:
+                with st.chat_message("assistant"):
+                    with st.spinner("🤔 Агент думає..."):
+                        response_text, debug, result = get_agent_response(prompt)
+                        sync_tasks_from_agent(result)
+                        st.markdown(response_text)
 
-            response = response_text
-        else:
-            response_text = ""
-            with st.chat_message("assistant"):
-                for chunk in stream_gemini_response(prompt, st.session_state.messages[:-1]):
-                    response_text += chunk
-                    st.markdown(chunk)
-            response = response_text
+                        # Debug не зникає — він всередині chat_container, не потребує rerun
+                        if show_agent_debug and debug:
+                            with st.expander("Debug: tool calls / results", expanded=False):
+                                st.json(debug)
+            else:
+                response_text = ""
+                with st.chat_message("assistant"):
+                    placeholder = st.empty()
+                    for chunk in stream_gemini_response(prompt, st.session_state.messages[:-1]):
+                        response_text += chunk
+                        placeholder.markdown(response_text)  # <- також виправлено: chunk замінено на response_text
 
-        if response:
-            st.session_state.messages.append({"role": "assistant", "content": response})
+            if response_text:
+                st.session_state.messages.append({"role": "assistant", "content": response_text})
 
 with task_col:
     st.subheader("Завдання")

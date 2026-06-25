@@ -1,6 +1,7 @@
-streamlit>=1.41.0
+streamlit
 google-genai
-langgraph
-langchain
+langchain-core
 langchain-google-genai
 langchain-community
+langgraph
+typing-extensions
